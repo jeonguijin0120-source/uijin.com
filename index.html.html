@@ -1,0 +1,1707 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PIXEL STRIKE 1v1 - 레트로 픽셀아트 미니 축구</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Noto+Sans+KR:wght@700;900&display=swap');
+
+  * {
+    box-sizing: border-box;
+    user-select: none;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: #11131a;
+    color: #fff;
+    font-family: 'Press Start 2P', 'Noto Sans KR', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  #game-wrapper {
+    position: relative;
+    border: 6px solid #3a3f58;
+    border-radius: 12px;
+    box-shadow: 0 0 40px rgba(0, 220, 255, 0.25), inset 0 0 20px rgba(0,0,0,0.8);
+    background: #000;
+    overflow: hidden;
+  }
+
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+
+  /* CRT Scanline Effect */
+  #game-wrapper::after {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.18) 50%);
+    background-size: 100% 4px;
+    pointer-events: none;
+  }
+
+  .controls-bar {
+    margin-top: 12px;
+    display: flex;
+    gap: 24px;
+    font-size: 11px;
+    color: #a0aec0;
+    background: #1a1d29;
+    padding: 10px 20px;
+    border-radius: 8px;
+    border: 2px solid #2d3246;
+    align-items: center;
+  }
+
+  .p1-badge { color: #4facfe; font-weight: bold; }
+  .p2-badge { color: #ff5e62; font-weight: bold; }
+
+  button.sound-btn {
+    background: #2d3246;
+    color: #fff;
+    border: 2px solid #4a5568;
+    padding: 6px 12px;
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  button.sound-btn:hover { background: #3f4763; }
+</style>
+</head>
+<body>
+
+<div id="game-wrapper">
+  <canvas id="gameCanvas" width="960" height="540"></canvas>
+</div>
+
+<div class="controls-bar">
+  <div><span class="p1-badge">[1P]</span> 이동: <b>W A S D</b> | 킥/필살기: <b>SPACE</b></div>
+  <div>|</div>
+  <div><span class="p2-badge">[2P]</span> 이동: <b>방향키(↑↓←→)</b> | 킥/필살기: <b>ENTER</b></div>
+  <div>|</div>
+  <button class="sound-btn" id="soundToggle">🔊 SOUND: ON</button>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+// ================= AUDIO SYSTEM (8-BIT WEB AUDIO) =================
+let soundEnabled = true;
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+document.getElementById('soundToggle').addEventListener('click', (e) => {
+  soundEnabled = !soundEnabled;
+  e.target.textContent = soundEnabled ? '🔊 SOUND: ON' : '🔇 SOUND: OFF';
+});
+
+function playTone(freq, type, duration, vol = 0.15, slideTo = null) {
+  if (!soundEnabled) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (slideTo) {
+    osc.frequency.exponentialRampToValueAtTime(slideTo, audioCtx.currentTime + duration);
+  }
+  gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + duration);
+}
+
+const SFX = {
+  cursor: () => playTone(520, 'square', 0.06, 0.08),
+  select: () => { playTone(660, 'square', 0.08, 0.1); setTimeout(() => playTone(880, 'square', 0.12, 0.1), 70); },
+  jump: () => playTone(220, 'square', 0.12, 0.08, 440),
+  kick: () => playTone(160, 'triangle', 0.1, 0.18, 70),
+  skill: () => {
+    playTone(300, 'sawtooth', 0.25, 0.18, 900);
+    setTimeout(() => playTone(450, 'square', 0.25, 0.15, 1200), 60);
+  },
+  whistle: () => {
+    playTone(2800, 'sine', 0.15, 0.12);
+    setTimeout(() => playTone(2850, 'sine', 0.25, 0.12), 180);
+  },
+  goal: () => {
+    const notes = [523.25, 659.25, 783.99, 1046.50];
+    notes.forEach((n, i) => setTimeout(() => playTone(n, 'square', 0.18, 0.14), i * 90));
+  },
+  freeze: () => playTone(900, 'sine', 0.3, 0.12, 300),
+  shield: () => playTone(180, 'sawtooth', 0.25, 0.15, 360)
+};
+
+// ================= GAME DATA: CHARACTERS & MAPS =================
+const CHARACTERS = [
+  {
+    id: 'blaze',
+    name: '블레이즈',
+    eng: 'BLAZE',
+    color: '#ff4b2b',
+    subColor: '#ffb347',
+    hairColor: '#ff2a00',
+    speed: 5.3,
+    jump: 12.2,
+    kickPower: 13.5,
+    skillName: '파이어 스트라이크',
+    skillDesc: '공을 불태우며 직선 초고속 슛 발사!',
+    stats: { spd: 4, pwr: 4, jmp: 3 }
+  },
+  {
+    id: 'volt',
+    name: '볼트',
+    eng: 'VOLT',
+    color: '#f7b731',
+    subColor: '#fff200',
+    hairColor: '#ffd32a',
+    speed: 6.4,
+    jump: 12.8,
+    kickPower: 12.0,
+    skillName: '썬더 대시 & 슛',
+    skillDesc: '전방 순간 대시 + 지그재그 번개 슛!',
+    stats: { spd: 5, pwr: 3, jmp: 4 }
+  },
+  {
+    id: 'guardian',
+    name: '가디언',
+    eng: 'GUARDIAN',
+    color: '#20bf6b',
+    subColor: '#a3cb38',
+    hairColor: '#009432',
+    speed: 4.5,
+    jump: 11.5,
+    kickPower: 14.5,
+    skillName: '아이언 월',
+    skillDesc: '3.5초간 거대화 + 철벽 방어막 생성!',
+    stats: { spd: 2, pwr: 5, jmp: 3 }
+  },
+  {
+    id: 'spin',
+    name: '스핀',
+    eng: 'SPIN',
+    color: '#0fb9b1',
+    subColor: '#7ed6df',
+    hairColor: '#22a6b3',
+    speed: 5.6,
+    jump: 13.2,
+    kickPower: 12.5,
+    skillName: '토네이도 커브',
+    skillDesc: '공중에 떴다 급강하하는 마구 슛!',
+    stats: { spd: 4, pwr: 3, jmp: 5 }
+  },
+  {
+    id: 'frost',
+    name: '프로스트',
+    eng: 'FROST',
+    color: '#45aaf2',
+    subColor: '#d1f2ff',
+    hairColor: '#70a1ff',
+    speed: 5.1,
+    jump: 12.0,
+    kickPower: 12.5,
+    skillName: '아이스 프리즈',
+    skillDesc: '얼음 슛 발사 + 상대를 2초간 빙결!',
+    stats: { spd: 3, pwr: 3, jmp: 4 }
+  },
+  {
+    id: 'crusher',
+    name: '크러셔',
+    eng: 'CRUSHER',
+    color: '#8854d0',
+    subColor: '#d980fa',
+    hairColor: '#5f27cd',
+    speed: 5.1,
+    jump: 13.8,
+    kickPower: 15.5,
+    skillName: '메테오 어스퀘이크',
+    skillDesc: '공이 바닥에 닿으면 지진파로 상대 2초 기절!',
+    stats: { spd: 3, pwr: 5, jmp: 4 }
+  }
+];
+
+const MAPS = [
+  {
+    id: 'grass',
+    name: '클래식 잔디 스타디움',
+    sub: '표준 경기장 • 맑은 낮',
+    gravity: 0.58,
+    ballBounce: 0.90,
+    friction: 0.985,
+    skyTop: '#2980b9',
+    skyBot: '#6dd5fa',
+    turf1: '#2ecc71',
+    turf2: '#27ae60',
+    lineColor: 'rgba(255,255,255,0.75)'
+  },
+  {
+    id: 'night',
+    name: '나이트 챔피언스 아레나',
+    sub: '야간 조명 • 빠른 템포',
+    gravity: 0.58,
+    ballBounce: 0.92,
+    friction: 0.99,
+    skyTop: '#0c1021',
+    skyBot: '#1e2749',
+    turf1: '#1b8a4b',
+    turf2: '#146c3a',
+    lineColor: 'rgba(120,240,255,0.7)'
+  },
+  {
+    id: 'beach',
+    name: '썸머 비치 필드',
+    sub: '모래사장 • 낮고 묵직한 바운드',
+    gravity: 0.62,
+    ballBounce: 0.80,
+    friction: 0.965,
+    skyTop: '#00a8ff',
+    skyBot: '#fbc531',
+    turf1: '#f6e58d',
+    turf2: '#f9ca24',
+    lineColor: 'rgba(255,255,255,0.85)'
+  },
+  {
+    id: 'space',
+    name: '스페이스 무중력 돔',
+    sub: '저중력 • 높은 점프와 체공',
+    gravity: 0.36,
+    ballBounce: 0.94,
+    friction: 0.992,
+    skyTop: '#050510',
+    skyBot: '#2c003e',
+    turf1: '#30336b',
+    turf2: '#130f40',
+    lineColor: 'rgba(224,86,253,0.8)'
+  }
+];
+
+// ================= GAME STATE =================
+let state = 'TITLE'; // TITLE, CHAR_SELECT, MAP_SELECT, PLAYING, GOAL_CELEBRATION, GAME_OVER
+let p1Cursor = 0;
+let p2Cursor = 1;
+let p1Locked = false;
+let p2Locked = false;
+let mapCursor = 0;
+let selectedMap = MAPS[0];
+
+const GROUND_Y = 465;
+const GOAL_WIDTH = 75;
+const GOAL_HEIGHT = 155;
+
+let timeLeft = 90;
+let timerAccum = 0;
+let isGoldenGoal = false;
+let goalBannerTimer = 0;
+let lastScorer = 0;
+let screenShake = 0;
+let particles = [];
+let floatingTexts = [];
+let shockwaves = [];
+
+const keys = {};
+
+window.addEventListener('keydown', (e) => {
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+    e.preventDefault();
+  }
+  if (!keys[e.code]) {
+    handleKeyPress(e.code);
+  }
+  keys[e.code] = true;
+});
+
+window.addEventListener('keyup', (e) => {
+  keys[e.code] = false;
+});
+
+function handleKeyPress(code) {
+  if (state === 'TITLE') {
+    if (code === 'Space' || code === 'Enter') {
+      SFX.select();
+      state = 'CHAR_SELECT';
+      p1Locked = false;
+      p2Locked = false;
+    }
+  } else if (state === 'CHAR_SELECT') {
+    // P1 controls
+    if (!p1Locked) {
+      if (code === 'KeyA') { p1Cursor = (p1Cursor + CHARACTERS.length - 1) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'KeyD') { p1Cursor = (p1Cursor + 1) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'KeyW') { p1Cursor = (p1Cursor + CHARACTERS.length - 3) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'KeyS') { p1Cursor = (p1Cursor + 3) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'Space') { p1Locked = true; SFX.select(); }
+    } else if (code === 'KeyS' || code === 'Escape') {
+      p1Locked = false; SFX.cursor();
+    }
+
+    // P2 controls
+    if (!p2Locked) {
+      if (code === 'ArrowLeft') { p2Cursor = (p2Cursor + CHARACTERS.length - 1) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'ArrowRight') { p2Cursor = (p2Cursor + 1) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'ArrowUp') { p2Cursor = (p2Cursor + CHARACTERS.length - 3) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'ArrowDown') { p2Cursor = (p2Cursor + 3) % CHARACTERS.length; SFX.cursor(); }
+      if (code === 'Enter') { p2Locked = true; SFX.select(); }
+    } else if (code === 'ArrowDown' || code === 'Backspace') {
+      p2Locked = false; SFX.cursor();
+    }
+
+    if (p1Locked && p2Locked) {
+      setTimeout(() => {
+        if (state === 'CHAR_SELECT' && p1Locked && p2Locked) {
+          state = 'MAP_SELECT';
+          mapCursor = 0;
+        }
+      }, 450);
+    }
+  } else if (state === 'MAP_SELECT') {
+    if (code === 'KeyA' || code === 'ArrowLeft') {
+      mapCursor = (mapCursor + MAPS.length - 1) % MAPS.length;
+      SFX.cursor();
+    }
+    if (code === 'KeyD' || code === 'ArrowRight') {
+      mapCursor = (mapCursor + 1) % MAPS.length;
+      SFX.cursor();
+    }
+    if (code === 'Space' || code === 'Enter') {
+      selectedMap = MAPS[mapCursor];
+      SFX.select();
+      startMatch();
+    }
+  } else if (state === 'PLAYING') {
+    if (code === 'Space') p1.tryKick();
+    if (code === 'Enter') p2.tryKick();
+  } else if (state === 'GAME_OVER') {
+    if (code === 'Space' || code === 'Enter') {
+      SFX.select();
+      state = 'CHAR_SELECT';
+      p1Locked = false;
+      p2Locked = false;
+    }
+  }
+}
+
+// ================= ENTITIES =================
+
+// ================= DETAILED PIXEL ART CHARACTER RENDERER =================
+function drawCharacterSprite(ctx, charId, facing, walkFrame, isKicking, isJumping, pose = 'normal') {
+  ctx.save();
+  const dir = facing || 1;
+  const bob = isJumping ? -2 : Math.abs(Math.sin(walkFrame)) * 3;
+
+  // Flip horizontally based on facing direction (default art faces RIGHT)
+  ctx.scale(dir, 1);
+
+  // Helper to draw crisp pixel blocks (px = 2x2 real pixels)
+  const px = (x, y, w, h, color) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(x * 2, y * 2, w * 2, h * 2);
+  };
+
+  // Legs & Boots animation
+  const drawLegs = (bootColor, sockColor, heavy = false) => {
+    const w = heavy ? 6 : 5;
+    if (isKicking) {
+      // Standing leg
+      px(-4, -6, w, 6, sockColor);
+      px(-4, -2, w + 1, 2, bootColor);
+      // Kicking leg extended forward
+      px(3, -9, 9, 4, sockColor);
+      px(9, -10, 4, 5, bootColor);
+    } else if (isJumping) {
+      px(-6, -7, w, 5, sockColor);
+      px(-6, -3, w + 1, 2, bootColor);
+      px(2, -9, w, 5, sockColor);
+      px(2, -5, w + 1, 2, bootColor);
+    } else {
+      const step = Math.round(Math.sin(walkFrame) * 3);
+      px(-6 + step, -6, w, 6, sockColor);
+      px(-6 + step, -2, w + 1, 2, bootColor);
+      px(1 - step, -6, w, 6, sockColor);
+      px(1 - step, -2, w + 1, 2, bootColor);
+    }
+  };
+
+  // Special Victory Taunt & Defeat Poses
+  if (pose === 'taunt') {
+    const bounce = Math.abs(Math.sin(Date.now() * 0.014)) * 6;
+    ctx.translate(0, -bounce);
+  } else if (pose === 'defeat') {
+    // Slumped defeated posture
+    ctx.translate(0, 6);
+    ctx.rotate(dir * 0.12);
+  } else if (pose === 'skill') {
+    // Dynamic forward lean / power charge pose
+    ctx.translate(dir * 4, -3);
+  }
+
+  if (charId === 'blaze') {
+    // BLAZE: Spiky Flame Striker with fluttering headband & fiery hair
+    drawLegs('#d63031', '#2d3436');
+    px(-8, -17 - bob/2, 16, 11, '#e17055');
+    px(-8, -14 - bob/2, 16, 3, '#fdcb6e');
+    px(-9, -17 - bob/2, 3, 5, '#d63031');
+    const wave = Math.round(Math.sin(Date.now() * 0.015) * 1.5);
+    px(-14, -25 - bob/2 + wave, 5, 2, '#ffeaa7');
+    px(-17, -24 - bob/2 - wave, 4, 2, '#ffeaa7');
+    px(-7, -28 - bob/2, 14, 11, '#ffdbac');
+    px(-8, -26 - bob/2, 16, 2, '#ffeaa7');
+    px(-9, -32 - bob/2, 18, 6, '#ff3f34');
+    px(-11, -34 - bob/2, 6, 4, '#ff5e57');
+    px(-4, -36 - bob/2, 7, 5, '#ffa801');
+    px(3, -34 - bob/2, 7, 4, '#ff3f34');
+    px(2, -23 - bob/2, 3, 3, '#1e272e');
+    px(4, -23 - bob/2, 1, 1, '#ffffff');
+    px(1, -24 - bob/2, 5, 1, '#b33939');
+
+  } else if (charId === 'volt') {
+    // VOLT: Electric Speedster with yellow lightning hair & cyber visor
+    drawLegs('#f1c40f', '#1e272e');
+    px(-7, -17 - bob/2, 14, 11, '#ffd32a');
+    px(-3, -17 - bob/2, 6, 11, '#1e272e');
+    px(0, -15 - bob/2, 3, 4, '#fff200');
+    px(-7, -28 - bob/2, 14, 11, '#ffdbac');
+    px(-9, -31 - bob/2, 18, 4, '#fff200');
+    px(-12, -33 - bob/2, 6, 3, '#ffd32a');
+    px(-3, -36 - bob/2, 5, 5, '#fff200');
+    px(4, -35 - bob/2, 8, 4, '#ffd32a');
+    px(9, -37 - bob/2, 4, 3, '#ffffff');
+    px(0, -24 - bob/2, 8, 3, '#00d8d6');
+    px(2, -24 - bob/2, 4, 1, '#ffffff');
+
+  } else if (charId === 'guardian') {
+    // GUARDIAN: Bulky Armored Tank with heavy shoulder pauldrons & crested helmet
+    drawLegs('#009432', '#2f3542', true);
+    px(-11, -18 - bob/2, 22, 12, '#20bf6b');
+    px(-9, -16 - bob/2, 18, 8, '#a3cb38');
+    px(-13, -19 - bob/2, 5, 6, '#006266');
+    px(8, -19 - bob/2, 5, 6, '#006266');
+    px(-8, -28 - bob/2, 16, 10, '#f8c291');
+    px(-9, -32 - bob/2, 18, 5, '#009432');
+    px(-10, -29 - bob/2, 3, 7, '#006266');
+    px(-2, -35 - bob/2, 4, 4, '#fed330');
+    px(2, -24 - bob/2, 3, 2, '#1e272e');
+    px(1, -25 - bob/2, 5, 1, '#006266');
+
+  } else if (charId === 'spin') {
+    // SPIN: Agile Wind Acrobat with fluttering scarf & swept cyan hair
+    drawLegs('#0fb9b1', '#ffffff');
+    px(-7, -17 - bob/2, 14, 11, '#0fb9b1');
+    const scarfWave = Math.round(Math.cos(Date.now() * 0.018) * 2);
+    px(-8, -18 - bob/2, 16, 3, '#ffffff');
+    px(-14, -17 - bob/2 + scarfWave, 6, 3, '#7ed6df');
+    px(-18, -16 - bob/2 - scarfWave, 5, 2, '#ffffff');
+    px(-7, -28 - bob/2, 14, 11, '#ffdbac');
+    px(-9, -32 - bob/2, 17, 5, '#22a6b3');
+    px(-12, -31 - bob/2, 5, 4, '#7ed6df');
+    px(2, -34 - bob/2, 7, 3, '#7ed6df');
+    px(2, -23 - bob/2, 3, 3, '#130f40');
+    px(4, -23 - bob/2, 1, 1, '#ffffff');
+    px(2, -19 - bob/2, 3, 1, '#e55039');
+
+  } else if (charId === 'frost') {
+    // FROST: Cool Ice Mage with fur-trimmed tunic & ice crystal crown
+    drawLegs('#45aaf2', '#dff9fb');
+    px(-9, -17 - bob/2, 18, 11, '#2d98da');
+    px(-5, -17 - bob/2, 10, 11, '#70a1ff');
+    px(-2, -16 - bob/2, 4, 9, '#ffffff');
+    px(-7, -28 - bob/2, 14, 11, '#ffeaa7');
+    px(-9, -32 - bob/2, 18, 5, '#d1f2ff');
+    px(-10, -29 - bob/2, 3, 8, '#74b9ff');
+    px(6, -29 - bob/2, 2, 6, '#74b9ff');
+    px(-3, -35 - bob/2, 2, 4, '#00a8ff');
+    px(2, -35 - bob/2, 2, 4, '#00a8ff');
+    px(2, -23 - bob/2, 3, 3, '#0984e3');
+    px(3, -23 - bob/2, 1, 1, '#ffffff');
+
+  } else if (charId === 'crusher') {
+    // CRUSHER: Heavyweight Mohawk Brawler with muscular arms & gold wristbands
+    drawLegs('#5f27cd', '#222f3e', true);
+    px(-10, -18 - bob/2, 20, 12, '#8854d0');
+    px(-12, -17 - bob/2, 3, 7, '#e0a96d');
+    px(9, -17 - bob/2, 3, 7, '#e0a96d');
+    px(-12, -12 - bob/2, 3, 2, '#fff200');
+    px(9, -12 - bob/2, 3, 2, '#fff200');
+    px(-8, -28 - bob/2, 16, 10, '#e0a96d');
+    px(-3, -36 - bob/2, 6, 8, '#d980fa');
+    px(-1, -38 - bob/2, 4, 3, '#fff200');
+    px(2, -24 - bob/2, 3, 2, '#111');
+    px(1, -25 - bob/2, 5, 1, '#5f27cd');
+  }
+
+  // Character-Specific Skill Pose FX & Victory Taunt / Defeat Expressions
+  if (pose === 'skill') {
+    if (charId === 'blaze') {
+      // Blazing Flame Kick Aura & Fire Wings
+      px(6, -16, 12, 8, '#ff4b2b');
+      px(10, -14, 10, 4, '#fff200');
+      px(-14, -24, 6, 8, '#ff6b6b');
+    } else if (charId === 'volt') {
+      // Electric Afterimage & Lightning Bolts
+      px(-16, -26, 6, 3, '#fff200');
+      px(8, -28, 10, 3, '#00d8d6');
+      px(12, -16, 8, 4, '#fff200');
+    } else if (charId === 'guardian') {
+      // Raised Shield Arms & Iron Fortress Burst
+      px(8, -26, 6, 16, '#a3cb38');
+      px(10, -24, 4, 12, '#fed330');
+    } else if (charId === 'spin') {
+      // Spinning Tornado Whirlwind around body
+      const spinPhase = Math.floor(Date.now() / 40) % 2;
+      px(spinPhase ? -14 : -10, -14, 26, 3, '#7ed6df');
+      px(spinPhase ? -10 : -14, -22, 26, 3, '#ffffff');
+    } else if (charId === 'frost') {
+      // Raised Ice Staff / Frost Crystal Magic Hands
+      px(8, -26, 5, 5, '#d1f2ff');
+      px(10, -30, 3, 12, '#00a8ff');
+      px(7, -27, 9, 3, '#74b9ff');
+    } else if (charId === 'crusher') {
+      // Overhead Double-Hammer Meteor Slam Pose!
+      px(4, -34, 6, 10, '#e0a96d');
+      px(3, -37, 8, 5, '#fff200');
+      px(6, -14, 12, 6, '#d980fa');
+    }
+  } else if (pose === 'taunt') {
+    // Victory Laughing / Mocking Arm Wave!
+    const waveArm = Math.floor(Date.now() / 120) % 2 === 0;
+    px(7, waveArm ? -26 : -21, 5, 6, '#ffdbac');
+    // Big cheeky laughing mouth
+    px(2, -20, 4, 2, '#d63031');
+  } else if (pose === 'defeat') {
+    // Crying pixel tears & gloomy sweat drop
+    const tearY = Math.floor((Date.now() / 90) % 8);
+    px(4, -21 + tearY, 2, 3, '#74b9ff');
+    px(-5, -27, 2, 4, '#00a8ff');
+  }
+
+  ctx.restore();
+}
+
+class Player {
+  constructor(num, charData, x) {
+    this.num = num;
+    this.char = charData;
+    this.x = x;
+    this.y = GROUND_Y;
+    this.vx = 0;
+    this.vy = 0;
+    this.baseRadius = 26;
+    this.radius = 26;
+    this.facing = num === 1 ? 1 : -1;
+    this.score = 0;
+    this.power = 40; // starts at 40%
+    this.kickAnim = 0;
+    this.skillAnim = 0;
+    this.giantTimer = 0;
+    this.freezeTimer = 0;
+    this.stunTimer = 0;
+    this.dashTimer = 0;
+    this.walkFrame = 0;
+  }
+
+  resetPos() {
+    this.x = this.num === 1 ? 230 : W - 230;
+    this.y = GROUND_Y;
+    this.vx = 0;
+    this.vy = 0;
+    this.facing = this.num === 1 ? 1 : -1;
+    this.giantTimer = 0;
+    this.freezeTimer = 0;
+    this.stunTimer = 0;
+    this.dashTimer = 0;
+    this.radius = this.baseRadius;
+  }
+
+  update() {
+    // Passive gauge charge
+    if (this.power < 100) {
+      this.power = Math.min(100, this.power + 0.14);
+    }
+
+    if (this.kickAnim > 0) this.kickAnim--;
+    if (this.skillAnim > 0) this.skillAnim--;
+    if (this.giantTimer > 0) {
+      this.giantTimer--;
+      this.radius = 44;
+    } else {
+      this.radius = this.baseRadius;
+    }
+
+    if (this.freezeTimer > 0 || this.stunTimer > 0) {
+      if (this.freezeTimer > 0) this.freezeTimer--;
+      if (this.stunTimer > 0) this.stunTimer--;
+      this.vx *= 0.8;
+      this.vy += selectedMap.gravity;
+      this.y += this.vy;
+      if (this.y >= GROUND_Y) { this.y = GROUND_Y; this.vy = 0; }
+      return;
+    }
+
+    const left = this.num === 1 ? keys['KeyA'] : keys['ArrowLeft'];
+    const right = this.num === 1 ? keys['KeyD'] : keys['ArrowRight'];
+    const up = this.num === 1 ? keys['KeyW'] : keys['ArrowUp'];
+
+    if (this.dashTimer > 0) {
+      this.dashTimer--;
+      spawnParticles(this.x, this.y - 20, '#fff200', 2);
+    } else {
+      if (left) {
+        this.vx = -this.char.speed;
+        this.facing = -1;
+        this.walkFrame += 0.25;
+      } else if (right) {
+        this.vx = this.char.speed;
+        this.facing = 1;
+        this.walkFrame += 0.25;
+      } else {
+        this.vx *= 0.78;
+        this.walkFrame = 0;
+      }
+    }
+
+    if (up && this.y >= GROUND_Y - 1) {
+      this.vy = -this.char.jump;
+      SFX.jump();
+      spawnParticles(this.x, GROUND_Y, '#ffffff', 5);
+    }
+
+    this.vy += selectedMap.gravity;
+    this.x += this.vx;
+    this.y += this.vy;
+
+    if (this.y >= GROUND_Y) {
+      this.y = GROUND_Y;
+      this.vy = 0;
+    }
+
+    // Wall bounds
+    const minX = GOAL_WIDTH + this.radius - 10;
+    const maxX = W - GOAL_WIDTH - this.radius + 10;
+    if (this.x < minX) this.x = minX;
+    if (this.x > maxX) this.x = maxX;
+  }
+
+  tryKick() {
+    if (this.freezeTimer > 0 || this.stunTimer > 0) return;
+    this.kickAnim = 14;
+    const isSuper = this.power >= 100;
+
+    // Guardian defensive skill can be triggered anytime at 100% power
+    if (isSuper && this.char.id === 'guardian') {
+      this.power = 0;
+      this.giantTimer = 210; // 3.5s
+      this.skillAnim = 26;
+      SFX.shield();
+      screenShake = 8;
+      addFloatingText(this.x, this.y - 70, 'IRON WALL!', '#20bf6b');
+      spawnParticles(this.x, this.y - 30, '#20bf6b', 22);
+    }
+
+    // Volt dash even if far from ball
+    if (isSuper && this.char.id === 'volt') {
+      this.vx = this.facing * 16;
+      this.dashTimer = 10;
+      this.skillAnim = 24;
+    }
+
+    const dx = ball.x - this.x;
+    const dy = ball.y - (this.y - this.radius * 0.8);
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < this.radius + ball.radius + 32) {
+      const dirX = this.num === 1 ? 1 : -1;
+      if (isSuper) {
+        this.activateSuperShot(dirX);
+      } else {
+        SFX.kick();
+        this.power = Math.min(100, this.power + 14);
+        const angle = (dy < -10) ? -0.68 : -0.52;
+        ball.vx = dirX * (this.char.kickPower * 0.95);
+        ball.vy = Math.sin(angle) * this.char.kickPower - 5.2;
+        ball.effect = null;
+        ball.owner = this.num;
+        spawnParticles(ball.x, ball.y, '#ffffff', 8);
+      }
+    } else if (!isSuper) {
+      SFX.kick();
+    }
+  }
+
+  activateSuperShot(dirX) {
+    this.power = 0;
+    this.skillAnim = 26;
+    SFX.skill();
+    screenShake = 12;
+    ball.owner = this.num;
+
+    switch (this.char.id) {
+      case 'blaze':
+        ball.vx = dirX * 22;
+        ball.vy = -1.5;
+        ball.effect = 'FIRE';
+        ball.effectTimer = 90;
+        addFloatingText(this.x, this.y - 65, 'FIRE STRIKE!', '#ff4b2b');
+        spawnParticles(ball.x, ball.y, '#ff4b2b', 25);
+        break;
+      case 'volt':
+        ball.vx = dirX * 19;
+        ball.vy = -4;
+        ball.effect = 'THUNDER';
+        ball.effectTimer = 90;
+        addFloatingText(this.x, this.y - 65, 'THUNDER SHOT!', '#fff200');
+        spawnParticles(ball.x, ball.y, '#fff200', 25);
+        break;
+      case 'spin':
+        ball.vx = dirX * 15;
+        ball.vy = -13;
+        ball.effect = 'TORNADO';
+        ball.effectTimer = 100;
+        addFloatingText(this.x, this.y - 65, 'TORNADO CURVE!', '#0fb9b1');
+        spawnParticles(ball.x, ball.y, '#7ed6df', 25);
+        break;
+      case 'frost':
+        ball.vx = dirX * 18;
+        ball.vy = -2.5;
+        ball.effect = 'ICE';
+        ball.effectTimer = 110;
+        addFloatingText(this.x, this.y - 65, 'ICE FREEZE!', '#45aaf2');
+        spawnParticles(ball.x, ball.y, '#d1f2ff', 25);
+        break;
+      case 'crusher':
+        ball.vx = dirX * 18;
+        ball.vy = 14;
+        ball.effect = 'METEOR';
+        ball.effectTimer = 100;
+        addFloatingText(this.x, this.y - 65, 'METEOR SMASH!', '#d980fa');
+        spawnParticles(ball.x, ball.y, '#8854d0', 28);
+        break;
+      default:
+        ball.vx = dirX * 20;
+        ball.vy = -3;
+        ball.effect = 'FIRE';
+        ball.effectTimer = 80;
+    }
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(Math.round(this.x), Math.round(this.y));
+
+    const scale = this.giantTimer > 0 ? 1.65 : 1.0;
+    ctx.scale(scale, scale);
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-20, -3, 40, 6);
+
+    // Power Aura when 100%
+    if (this.power >= 100) {
+      const pulse = Math.sin(Date.now() * 0.015) * 4;
+      ctx.strokeStyle = this.char.subColor;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(-22 - pulse/2, -56 - pulse/2, 44 + pulse, 56 + pulse);
+    }
+
+    // Iron wall shield aura
+    if (this.giantTimer > 0) {
+      ctx.strokeStyle = '#20bf6b';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(0, -26, 34, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Draw detailed character sprite
+    const currentPose = this.skillAnim > 0 ? 'skill' : 'normal';
+    drawCharacterSprite(
+      ctx,
+      this.char.id,
+      this.facing,
+      this.walkFrame,
+      this.kickAnim > 0,
+      this.y < GROUND_Y - 2,
+      currentPose
+    );
+
+    // Frozen block overlay
+    if (this.freezeTimer > 0) {
+      ctx.fillStyle = 'rgba(116, 185, 255, 0.55)';
+      ctx.fillRect(-22, -66, 44, 68);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-22, -66, 44, 68);
+    }
+
+    // Stunned dizzy stars overlay
+    if (this.stunTimer > 0) {
+      const t = Date.now() * 0.012;
+      for (let i = 0; i < 3; i++) {
+        const ang = t + (i * Math.PI * 2) / 3;
+        const sx = Math.cos(ang) * 18;
+        const sy = -68 + Math.sin(ang) * 5;
+        ctx.fillStyle = '#fff200';
+        ctx.fillRect(sx - 3, sy - 3, 6, 6);
+      }
+    }
+
+    ctx.restore();
+
+    // P1 / P2 indicator arrow above head
+    const topY = this.y - (this.giantTimer > 0 ? 115 : 74);
+    ctx.fillStyle = this.num === 1 ? '#4facfe' : '#ff5e62';
+    ctx.font = '10px "Press Start 2P"';
+    ctx.textAlign = 'center';
+    ctx.fillText(this.num === 1 ? '1P' : '2P', this.x, topY);
+  }
+}
+
+class Ball {
+  constructor() {
+    this.radius = 15;
+    this.reset();
+  }
+
+  reset(towardPlayer = 0) {
+    this.x = W / 2;
+    this.y = 180;
+    this.vx = towardPlayer === 1 ? -3 : (towardPlayer === 2 ? 3 : (Math.random() > 0.5 ? 2.5 : -2.5));
+    this.vy = -2;
+    this.rotation = 0;
+    this.effect = null;
+    this.effectTimer = 0;
+    this.owner = 0;
+  }
+
+  update() {
+    if (this.effectTimer > 0) {
+      this.effectTimer--;
+      if (this.effectTimer <= 0) this.effect = null;
+    }
+
+    // Special shot trajectories
+    if (this.effect === 'FIRE') {
+      this.vy *= 0.85;
+      spawnParticles(this.x, this.y, '#ff4b2b', 3);
+      spawnParticles(this.x, this.y, '#ffd32a', 2);
+    } else if (this.effect === 'THUNDER') {
+      this.vy = Math.sin(Date.now() * 0.04) * 11;
+      spawnParticles(this.x, this.y, '#fff200', 3);
+    } else if (this.effect === 'TORNADO') {
+      if (this.effectTimer > 65) {
+        this.vy = -6;
+      } else {
+        this.vy += 1.35; // sharp dive
+      }
+      spawnParticles(this.x, this.y, '#0fb9b1', 3);
+    } else if (this.effect === 'ICE') {
+      this.vy += selectedMap.gravity * 0.5;
+      spawnParticles(this.x, this.y, '#74b9ff', 3);
+    } else if (this.effect === 'METEOR') {
+      this.vy += selectedMap.gravity * 1.4;
+      spawnParticles(this.x, this.y, '#d980fa', 3);
+    } else {
+      this.vy += selectedMap.gravity;
+    }
+
+    this.vx *= selectedMap.friction;
+    this.x += this.vx;
+    this.y += this.vy;
+    this.rotation += this.vx * 0.06;
+
+    // Ground bounce
+    if (this.y + this.radius >= GROUND_Y) {
+      this.y = GROUND_Y - this.radius;
+      if (this.effect === 'METEOR') {
+        this.vy = -16.5;
+        screenShake = 20;
+        SFX.shield();
+        spawnParticles(this.x, GROUND_Y, '#d980fa', 30);
+        spawnParticles(this.x, GROUND_Y, '#fff200', 18);
+        shockwaves.push({ x: this.x, y: GROUND_Y, radius: 10, maxRadius: 420, life: 24 });
+
+        const target = this.owner === 1 ? p2 : p1;
+        if (target && target.giantTimer <= 0) {
+          target.stunTimer = 120; // 2.0 seconds stun
+          target.vy = -6;
+          addFloatingText(target.x, target.y - 78, 'STUNNED!!', '#fff200');
+          spawnParticles(target.x, target.y - 30, '#fff200', 16);
+        }
+        this.effect = null;
+      } else {
+        if (Math.abs(this.vy) > 2.5) {
+          SFX.kick();
+          this.vy = -Math.max(Math.abs(this.vy) * selectedMap.ballBounce, 5.5);
+        } else {
+          this.vy = -this.vy * selectedMap.ballBounce;
+        }
+      }
+    }
+
+    // Ceiling bounce
+    if (this.y - this.radius < 65) {
+      this.y = 65 + this.radius;
+      this.vy = Math.abs(this.vy) * 0.7;
+    }
+
+    // Crossbar collisions
+    const crossbarY = GROUND_Y - GOAL_HEIGHT;
+    // Left crossbar
+    if (this.x - this.radius < GOAL_WIDTH && Math.abs(this.y - crossbarY) < this.radius + 6) {
+      if (this.y < crossbarY) {
+        this.y = crossbarY - this.radius - 6;
+        this.vy = -Math.abs(this.vy) * 0.8;
+      } else {
+        this.x = GOAL_WIDTH + this.radius;
+        this.vx = Math.abs(this.vx) * 0.8;
+      }
+      SFX.kick();
+    }
+    // Right crossbar
+    if (this.x + this.radius > W - GOAL_WIDTH && Math.abs(this.y - crossbarY) < this.radius + 6) {
+      if (this.y < crossbarY) {
+        this.y = crossbarY - this.radius - 6;
+        this.vy = -Math.abs(this.vy) * 0.8;
+      } else {
+        this.x = W - GOAL_WIDTH - this.radius;
+        this.vx = -Math.abs(this.vx) * 0.8;
+      }
+      SFX.kick();
+    }
+
+    // Goal detection!
+    if (this.y > crossbarY) {
+      if (this.x - this.radius < GOAL_WIDTH - 18) {
+        scoreGoal(2);
+        return;
+      }
+      if (this.x + this.radius > W - GOAL_WIDTH + 18) {
+        scoreGoal(1);
+        return;
+      }
+    } else {
+      // Side walls above goal
+      if (this.x - this.radius < 10) {
+        this.x = 10 + this.radius;
+        this.vx = Math.abs(this.vx) * 0.85;
+      }
+      if (this.x + this.radius > W - 10) {
+        this.x = W - 10 - this.radius;
+        this.vx = -Math.abs(this.vx) * 0.85;
+      }
+    }
+
+    // Player body / header collisions
+    [p1, p2].forEach(p => {
+      const centerY = p.y - p.radius;
+      const dx = this.x - p.x;
+      const dy = this.y - centerY;
+      const dist = Math.hypot(dx, dy);
+      const minDist = this.radius + p.radius;
+
+      if (dist < minDist && dist > 0) {
+        // Ice effect freezes opponent on contact!
+        if (this.effect === 'ICE' && this.owner !== p.num && p.giantTimer <= 0) {
+          p.freezeTimer = 120; // 2 seconds
+          SFX.freeze();
+          addFloatingText(p.x, p.y - 75, 'FROZEN!', '#74b9ff');
+          spawnParticles(p.x, p.y - 30, '#74b9ff', 20);
+          this.effect = null;
+        }
+
+        const nx = dx / dist;
+        const ny = dy / dist;
+        this.x = p.x + nx * (minDist + 1);
+        this.y = centerY + ny * (minDist + 1);
+
+        // Guardian giant deflects super shots easily
+        if (p.giantTimer > 0) {
+          this.effect = null;
+          this.vx = (p.num === 1 ? 1 : -1) * 14;
+          this.vy = -7;
+          SFX.shield();
+          spawnParticles(this.x, this.y, '#20bf6b', 14);
+        } else {
+          const impact = Math.max(10.5, Math.hypot(this.vx, this.vy) * 0.92);
+          this.vx = nx * impact + p.vx * 0.65;
+          this.vy = Math.min(ny * impact - 5.5, -6.5);
+          if (this.effect && this.owner !== p.num) this.effect = null;
+          SFX.kick();
+        }
+      }
+    });
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(Math.round(this.x), Math.round(this.y));
+
+    // Effect glow
+    if (this.effect) {
+      const colors = {
+        FIRE: 'rgba(255, 75, 43, 0.5)',
+        THUNDER: 'rgba(255, 242, 0, 0.5)',
+        TORNADO: 'rgba(15, 185, 177, 0.5)',
+        ICE: 'rgba(116, 185, 255, 0.6)',
+        METEOR: 'rgba(217, 128, 250, 0.6)'
+      };
+      ctx.fillStyle = colors[this.effect] || 'rgba(255,255,255,0.4)';
+      ctx.beginPath();
+      ctx.arc(0, 0, this.radius + 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.rotate(this.rotation);
+
+    // Classic pixel soccer ball
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#111';
+    ctx.stroke();
+
+    // Pentagon patches
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(-5, -5, 10, 10);
+    ctx.fillRect(-13, -3, 5, 6);
+    ctx.fillRect(8, -3, 5, 6);
+    ctx.fillRect(-3, -13, 6, 5);
+    ctx.fillRect(-3, 8, 6, 5);
+
+    ctx.restore();
+  }
+}
+
+let p1, p2, ball;
+
+function startMatch() {
+  p1 = new Player(1, CHARACTERS[p1Cursor], 230);
+  p2 = new Player(2, CHARACTERS[p2Cursor], W - 230);
+  ball = new Ball();
+  timeLeft = 90;
+  timerAccum = 0;
+  isGoldenGoal = false;
+  particles = [];
+  floatingTexts = [];
+  shockwaves = [];
+  state = 'PLAYING';
+  SFX.whistle();
+}
+
+function scoreGoal(scorerNum) {
+  if (state !== 'PLAYING') return;
+  SFX.goal();
+  screenShake = 18;
+  lastScorer = scorerNum;
+  if (scorerNum === 1) p1.score++;
+  else p2.score++;
+
+  spawnParticles(ball.x, ball.y, scorerNum === 1 ? '#4facfe' : '#ff5e62', 45);
+
+  if (isGoldenGoal) {
+    state = 'GAME_OVER';
+    SFX.whistle();
+    return;
+  }
+
+  state = 'GOAL_CELEBRATION';
+  goalBannerTimer = 110;
+}
+
+// ================= PARTICLES & TEXT =================
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 10,
+      vy: (Math.random() - 0.8) * 10,
+      size: Math.floor(Math.random() * 5) + 3,
+      color,
+      life: 25 + Math.random() * 20
+    });
+  }
+}
+
+function addFloatingText(x, y, text, color) {
+  floatingTexts.push({ x, y, text, color, life: 55 });
+}
+
+function updateEffects() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    pt.x += pt.vx;
+    pt.y += pt.vy;
+    pt.vy += 0.25;
+    pt.life--;
+    if (pt.life <= 0) particles.splice(i, 1);
+  }
+  for (let i = floatingTexts.length - 1; i >= 0; i--) {
+    const ft = floatingTexts[i];
+    ft.y -= 0.8;
+    ft.life--;
+    if (ft.life <= 0) floatingTexts.splice(i, 1);
+  }
+  for (let i = shockwaves.length - 1; i >= 0; i--) {
+    const sw = shockwaves[i];
+    sw.radius += 18;
+    sw.life--;
+    if (sw.life <= 0) shockwaves.splice(i, 1);
+  }
+  if (screenShake > 0) screenShake--;
+}
+
+// ================= RENDERING HELPERS =================
+function drawStadium(map) {
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  grad.addColorStop(0, map.skyTop);
+  grad.addColorStop(1, map.skyBot);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, GROUND_Y);
+
+  // Map-specific background details
+  if (map.id === 'grass') {
+    // Pixel clouds & sun
+    ctx.fillStyle = '#ffeaa7';
+    ctx.fillRect(80, 90, 44, 44);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    [[180, 110], [520, 95], [760, 125]].forEach(([cx, cy]) => {
+      ctx.fillRect(cx, cy, 70, 20);
+      ctx.fillRect(cx + 12, cy - 12, 46, 12);
+    });
+  } else if (map.id === 'night') {
+    // Stadium floodlights & stars
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < 25; i++) {
+      ctx.fillRect((i * 137) % W, 70 + (i * 53) % 180, 3, 3);
+    }
+    ctx.fillStyle = 'rgba(255, 255, 220, 0.12)';
+    ctx.beginPath(); ctx.moveTo(120, 70); ctx.lineTo(350, GROUND_Y); ctx.lineTo(40, GROUND_Y); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(W - 120, 70); ctx.lineTo(W - 40, GROUND_Y); ctx.lineTo(W - 350, GROUND_Y); ctx.fill();
+  } else if (map.id === 'beach') {
+    // Ocean horizon
+    ctx.fillStyle = '#0984e3';
+    ctx.fillRect(0, GROUND_Y - 55, W, 55);
+    ctx.fillStyle = '#74b9ff';
+    ctx.fillRect(0, GROUND_Y - 55, W, 6);
+  } else if (map.id === 'space') {
+    // Planet & stars
+    ctx.fillStyle = '#a29bfe';
+    ctx.beginPath(); ctx.arc(760, 145, 42, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#fd79a8';
+    ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.ellipse(760, 145, 72, 14, -0.3, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < 40; i++) {
+      ctx.fillRect((i * 97) % W, 65 + (i * 61) % 350, 3, 3);
+    }
+  }
+
+  // Crowd stands silhouette
+  ctx.fillStyle = 'rgba(15, 20, 35, 0.55)';
+  ctx.fillRect(0, GROUND_Y - 36, W, 36);
+  for (let x = 16; x < W; x += 28) {
+    ctx.fillStyle = (x % 56 === 0) ? '#4facfe' : '#ff5e62';
+    const jump = Math.sin(Date.now() * 0.008 + x) * 3;
+    ctx.fillRect(x, GROUND_Y - 26 + jump, 10, 12);
+  }
+
+  // Striped Pixel Turf
+  const stripeW = 60;
+  for (let x = 0; x < W; x += stripeW) {
+    ctx.fillStyle = ((x / stripeW) % 2 === 0) ? map.turf1 : map.turf2;
+    ctx.fillRect(x, GROUND_Y, stripeW, H - GROUND_Y);
+  }
+
+  // Field lines
+  ctx.fillStyle = map.lineColor;
+  ctx.fillRect(0, GROUND_Y, W, 5);
+  ctx.fillRect(W / 2 - 2, GROUND_Y, 4, H - GROUND_Y);
+
+  // Goals (Left & Right)
+  drawGoal(0, true);
+  drawGoal(W - GOAL_WIDTH, false);
+}
+
+function drawGoal(x, isLeft) {
+  const topY = GROUND_Y - GOAL_HEIGHT;
+  // Net mesh
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 2;
+  for (let nx = x + 10; nx < x + GOAL_WIDTH; nx += 14) {
+    ctx.beginPath(); ctx.moveTo(nx, topY); ctx.lineTo(nx, GROUND_Y); ctx.stroke();
+  }
+  for (let ny = topY + 14; ny < GROUND_Y; ny += 14) {
+    ctx.beginPath(); ctx.moveTo(x, ny); ctx.lineTo(x + GOAL_WIDTH, ny); ctx.stroke();
+  }
+  // Goal frame
+  ctx.fillStyle = '#ecf0f1';
+  ctx.fillRect(x, topY, GOAL_WIDTH, 8);
+  ctx.fillRect(isLeft ? x : x + GOAL_WIDTH - 8, topY, 8, GOAL_HEIGHT);
+}
+
+function drawHUD() {
+  // Top HUD bar
+  ctx.fillStyle = '#141724';
+  ctx.fillRect(0, 0, W, 62);
+  ctx.fillStyle = '#2d344d';
+  ctx.fillRect(0, 58, W, 4);
+
+  // Timer box
+  ctx.fillStyle = isGoldenGoal ? '#e84118' : '#1e272e';
+  ctx.fillRect(W / 2 - 54, 6, 108, 48);
+  ctx.strokeStyle = '#ffd32a';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(W / 2 - 54, 6, 108, 48);
+
+  ctx.fillStyle = isGoldenGoal ? '#fff200' : '#ffffff';
+  ctx.font = isGoldenGoal ? '12px "Press Start 2P"' : '22px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.fillText(isGoldenGoal ? 'GOLDEN' : String(Math.ceil(timeLeft)).padStart(2, '0'), W / 2, isGoldenGoal ? 36 : 40);
+
+  // P1 Info & Power Bar
+  ctx.fillStyle = '#4facfe';
+  ctx.font = '13px "Press Start 2P"';
+  ctx.textAlign = 'left';
+  ctx.fillText(`1P ${p1.char.eng}`, 20, 24);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '24px "Press Start 2P"';
+  ctx.textAlign = 'right';
+  ctx.fillText(p1.score, W / 2 - 75, 42);
+
+  // P1 Gauge
+  ctx.fillStyle = '#2f3640';
+  ctx.fillRect(20, 32, 220, 16);
+  ctx.fillStyle = p1.power >= 100 ? (Math.floor(Date.now() / 100) % 2 === 0 ? '#fff200' : '#ff4b2b') : '#00a8ff';
+  ctx.fillRect(22, 34, (216 * p1.power) / 100, 12);
+  if (p1.power >= 100) {
+    ctx.fillStyle = '#111';
+    ctx.font = '9px "Press Start 2P"';
+    ctx.textAlign = 'center';
+    ctx.fillText('SKILL READY!', 130, 44);
+  }
+
+  // P2 Info & Power Bar
+  ctx.fillStyle = '#ff5e62';
+  ctx.font = '13px "Press Start 2P"';
+  ctx.textAlign = 'right';
+  ctx.fillText(`${p2.char.eng} 2P`, W - 20, 24);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '24px "Press Start 2P"';
+  ctx.textAlign = 'left';
+  ctx.fillText(p2.score, W / 2 + 75, 42);
+
+  // P2 Gauge
+  ctx.fillStyle = '#2f3640';
+  ctx.fillRect(W - 240, 32, 220, 16);
+  ctx.fillStyle = p2.power >= 100 ? (Math.floor(Date.now() / 100) % 2 === 0 ? '#fff200' : '#ff4b2b') : '#ff5e62';
+  const p2Fill = (216 * p2.power) / 100;
+  ctx.fillRect(W - 22 - p2Fill, 34, p2Fill, 12);
+  if (p2.power >= 100) {
+    ctx.fillStyle = '#111';
+    ctx.font = '9px "Press Start 2P"';
+    ctx.textAlign = 'center';
+    ctx.fillText('SKILL READY!', W - 130, 44);
+  }
+}
+
+// ================= SCREENS =================
+function drawTitleScreen() {
+  drawStadium(MAPS[0]);
+  ctx.fillStyle = 'rgba(10, 12, 22, 0.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = '42px "Press Start 2P"';
+  ctx.fillText('PIXEL STRIKE', W / 2, 180);
+
+  ctx.fillStyle = '#4facfe';
+  ctx.font = '22px "Press Start 2P"';
+  ctx.fillText('1 vs 1 ARCADE SOCCER', W / 2, 230);
+
+  ctx.fillStyle = '#d2dae2';
+  ctx.font = '13px "Noto Sans KR"';
+  ctx.fillText('6명의 개성파 캐릭터 • 4종의 다이나믹 경기장 • 90초 타임어택 매치', W / 2, 285);
+
+  if (Math.floor(Date.now() / 450) % 2 === 0) {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '18px "Press Start 2P"';
+    ctx.fillText('PRESS SPACE OR ENTER TO START', W / 2, 385);
+  }
+}
+
+function drawCharSelectScreen() {
+  ctx.fillStyle = '#131624';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = '24px "Press Start 2P"';
+  ctx.fillText('SELECT YOUR STRIKER', W / 2, 48);
+
+  const cols = 3;
+  const cardW = 190;
+  const cardH = 125;
+  const startX = (W - (cols * cardW + 40)) / 2;
+  const startY = 75;
+
+  CHARACTERS.forEach((c, idx) => {
+    const col = idx % cols;
+    const row = Math.floor(idx / cols);
+    const x = startX + col * (cardW + 20);
+    const y = startY + row * (cardH + 16);
+
+    ctx.fillStyle = '#1e2438';
+    ctx.fillRect(x, y, cardW, cardH);
+
+    // Character detailed pixel portrait
+    ctx.save();
+    ctx.translate(x + 40, y + 84);
+    ctx.scale(0.95, 0.95);
+    const animFrame = (p1Cursor === idx || p2Cursor === idx) ? Date.now() * 0.008 : 0;
+    drawCharacterSprite(ctx, c.id, 1, animFrame, false, false);
+    ctx.restore();
+
+    // Name & Skill
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px "Noto Sans KR"';
+    ctx.fillText(c.name, x + 70, y + 38);
+
+    ctx.fillStyle = c.subColor;
+    ctx.font = 'bold 11px "Noto Sans KR"';
+    ctx.fillText(c.skillName, x + 70, y + 60);
+
+    // Mini stat bars
+    ctx.fillStyle = '#a0aec0';
+    ctx.font = '9px "Press Start 2P"';
+    ctx.fillText(`SPD:${'■'.repeat(c.stats.spd)}`, x + 20, y + 96);
+    ctx.fillText(`PWR:${'■'.repeat(c.stats.pwr)}`, x + 20, y + 112);
+
+    // Cursors
+    const isP1 = p1Cursor === idx;
+    const isP2 = p2Cursor === idx;
+    if (isP1) {
+      ctx.strokeStyle = '#4facfe';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(x - 2, y - 2, cardW + 4, cardH + 4);
+      ctx.fillStyle = '#4facfe';
+      ctx.font = '10px "Press Start 2P"';
+      ctx.fillText(p1Locked ? '1P OK!' : '1P', x + 6, y + 14);
+    }
+    if (isP2) {
+      ctx.strokeStyle = '#ff5e62';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(x + 3, y + 3, cardW - 6, cardH - 6);
+      ctx.fillStyle = '#ff5e62';
+      ctx.font = '10px "Press Start 2P"';
+      ctx.textAlign = 'right';
+      ctx.fillText(p2Locked ? '2P OK!' : '2P', x + cardW - 6, y + 14);
+    }
+  });
+
+  // Bottom comparison panel for 1P and 2P selected characters
+  const c1 = CHARACTERS[p1Cursor];
+  const c2 = CHARACTERS[p2Cursor];
+
+  ctx.fillStyle = '#1a1f33';
+  ctx.fillRect(40, 355, 420, 155);
+  ctx.strokeStyle = '#4facfe';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(40, 355, 420, 155);
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#4facfe';
+  ctx.font = '13px "Press Start 2P"';
+  ctx.fillText(`1P: ${c1.name} (${c1.eng})`, 58, 385);
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = 'bold 14px "Noto Sans KR"';
+  ctx.fillText(`★ 필살기: ${c1.skillName}`, 58, 415);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = '13px "Noto Sans KR"';
+  ctx.fillText(c1.skillDesc, 58, 442);
+  ctx.fillStyle = '#718096';
+  ctx.font = '11px "Noto Sans KR"';
+  ctx.fillText(p1Locked ? '✔ 선택 완료! (취소: S)' : '이동: W A S D / 확정: SPACE', 58, 488);
+
+  ctx.fillStyle = '#1a1f33';
+  ctx.fillRect(500, 355, 420, 155);
+  ctx.strokeStyle = '#ff5e62';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(500, 355, 420, 155);
+
+  ctx.fillStyle = '#ff5e62';
+  ctx.font = '13px "Press Start 2P"';
+  ctx.fillText(`2P: ${c2.name} (${c2.eng})`, 518, 385);
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = 'bold 14px "Noto Sans KR"';
+  ctx.fillText(`★ 필살기: ${c2.skillName}`, 518, 415);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = '13px "Noto Sans KR"';
+  ctx.fillText(c2.skillDesc, 518, 442);
+  ctx.fillStyle = '#718096';
+  ctx.font = '11px "Noto Sans KR"';
+  ctx.fillText(p2Locked ? '✔ 선택 완료! (취소: ↓)' : '이동: 방향키 / 확정: ENTER', 518, 488);
+}
+
+function drawMapSelectScreen() {
+  ctx.fillStyle = '#131624';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = '24px "Press Start 2P"';
+  ctx.fillText('SELECT STADIUM', W / 2, 60);
+
+  const cardW = 200;
+  const cardH = 260;
+  const gap = 22;
+  const startX = (W - (MAPS.length * cardW + (MAPS.length - 1) * gap)) / 2;
+
+  MAPS.forEach((m, idx) => {
+    const x = startX + idx * (cardW + gap);
+    const y = 120;
+    const selected = mapCursor === idx;
+
+    // Preview box
+    const grad = ctx.createLinearGradient(0, y, 0, y + 150);
+    grad.addColorStop(0, m.skyTop);
+    grad.addColorStop(1, m.skyBot);
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, cardW, 150);
+
+    ctx.fillStyle = m.turf1;
+    ctx.fillRect(x, y + 115, cardW, 35);
+
+    // Card info box
+    ctx.fillStyle = selected ? '#252d4a' : '#1b2033';
+    ctx.fillRect(x, y + 150, cardW, cardH - 150);
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px "Noto Sans KR"';
+    ctx.fillText(m.name, x + cardW / 2, y + 185);
+
+    ctx.fillStyle = '#a0aec0';
+    ctx.font = '11px "Noto Sans KR"';
+    ctx.fillText(m.sub, x + cardW / 2, y + 215);
+
+    if (selected) {
+      ctx.strokeStyle = '#ffd32a';
+      ctx.lineWidth = 5;
+      ctx.strokeRect(x - 3, y - 3, cardW + 6, cardH + 6);
+    }
+  });
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px "Noto Sans KR"';
+  ctx.fillText('◀ / ▶ 키로 경기장을 고른 뒤 SPACE 또는 ENTER를 눌러 경기 시작!', W / 2, 455);
+}
+
+// ================= MAIN LOOP =================
+let lastTime = performance.now();
+
+function loop(now) {
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+  ctx.save();
+  if (screenShake > 0) {
+    ctx.translate((Math.random() - 0.5) * screenShake, (Math.random() - 0.5) * screenShake);
+  }
+
+  if (state === 'TITLE') {
+    drawTitleScreen();
+  } else if (state === 'CHAR_SELECT') {
+    drawCharSelectScreen();
+  } else if (state === 'MAP_SELECT') {
+    drawMapSelectScreen();
+  } else if (state === 'PLAYING' || state === 'GOAL_CELEBRATION' || state === 'GAME_OVER') {
+    drawStadium(selectedMap);
+    drawHUD();
+
+    if (state === 'PLAYING') {
+      if (!isGoldenGoal) {
+        timerAccum += dt;
+        if (timerAccum >= 1) {
+          timeLeft -= Math.floor(timerAccum);
+          timerAccum %= 1;
+          if (timeLeft <= 0) {
+            timeLeft = 0;
+            if (p1.score === p2.score) {
+              isGoldenGoal = true;
+              SFX.whistle();
+              addFloatingText(W / 2, H / 2 - 40, 'GOLDEN GOAL! NEXT SCORE WINS!', '#fff200');
+            } else {
+              state = 'GAME_OVER';
+              SFX.whistle();
+            }
+          }
+        }
+      }
+      p1.update();
+      p2.update();
+      ball.update();
+    } else if (state === 'GOAL_CELEBRATION') {
+      goalBannerTimer--;
+      if (goalBannerTimer <= 0) {
+        p1.resetPos();
+        p2.resetPos();
+        ball.reset(lastScorer === 1 ? 2 : 1);
+        state = 'PLAYING';
+        SFX.whistle();
+      }
+    }
+
+    updateEffects();
+
+    p1.draw();
+    p2.draw();
+    ball.draw();
+
+    // Render shockwaves
+    shockwaves.forEach(sw => {
+      ctx.save();
+      ctx.strokeStyle = `rgba(217, 128, 250, ${sw.life / 24})`;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(sw.x, sw.y, sw.radius, Math.PI, 0);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // Render particles
+    particles.forEach(pt => {
+      ctx.fillStyle = pt.color;
+      ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
+    });
+
+    // Render floating texts
+    floatingTexts.forEach(ft => {
+      ctx.fillStyle = ft.color;
+      ctx.font = '14px "Press Start 2P"';
+      ctx.textAlign = 'center';
+      ctx.fillText(ft.text, ft.x, ft.y);
+    });
+
+    if (state === 'GOAL_CELEBRATION') {
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(0, H / 2 - 55, W, 110);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = lastScorer === 1 ? '#4facfe' : '#ff5e62';
+      ctx.font = '44px "Press Start 2P"';
+      ctx.fillText(`${lastScorer}P GOAL!!`, W / 2, H / 2 + 16);
+    }
+
+    if (state === 'GAME_OVER') {
+      ctx.fillStyle = 'rgba(10, 12, 22, 0.86)';
+      ctx.fillRect(0, 0, W, H);
+
+      const winnerNum = p1.score > p2.score ? 1 : 2;
+      const winPlayer = winnerNum === 1 ? p1 : p2;
+      const losePlayer = winnerNum === 1 ? p2 : p1;
+
+      const taunts = {
+        blaze: '"하하! 내 불꽃 슛 맛 좀 봤냐?!"',
+        volt: '"너무 느려서 하품 나오네~ 메롱!"',
+        guardian: '"철벽 수비 뚫을 수 있겠어? 크크!"',
+        spin: '"어지럽지? 빙글빙글 약 오르지~!"',
+        frost: '"얼음땡! 그대로 꽁꽁 얼어있어~"',
+        crusher: '"으하하! 바닥에 납작해졌구만!"'
+      };
+
+      // Stage spotlight podium
+      ctx.fillStyle = '#1e2438';
+      ctx.fillRect(W / 2 - 260, 155, 520, 235);
+      ctx.strokeStyle = winnerNum === 1 ? '#4facfe' : '#ff5e62';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(W / 2 - 260, 155, 520, 235);
+
+      // Floor line inside podium
+      ctx.fillStyle = '#2ecc71';
+      ctx.fillRect(W / 2 - 240, 345, 480, 14);
+
+      // Winner Character (Large, facing Loser, jumping & laughing/taunting!)
+      ctx.save();
+      ctx.translate(W / 2 - 90, 345);
+      ctx.scale(1.85, 1.85);
+      drawCharacterSprite(ctx, winPlayer.char.id, 1, Date.now() * 0.01, false, false, 'taunt');
+      ctx.restore();
+
+      // Loser Character (Facing away or slumped, crying pixel tears!)
+      ctx.save();
+      ctx.translate(W / 2 + 115, 345);
+      ctx.scale(1.55, 1.55);
+      drawCharacterSprite(ctx, losePlayer.char.id, -1, 0, false, false, 'defeat');
+      ctx.restore();
+
+      // Comic Speech Bubble from Winner mocking Loser
+      const bubbleY = 185 + Math.sin(Date.now() * 0.008) * 3;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(W / 2 - 235, bubbleY, 470, 44);
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(W / 2 - 235, bubbleY, 470, 44);
+      // Bubble tail pointing to winner
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(W / 2 - 110, bubbleY + 44);
+      ctx.lineTo(W / 2 - 95, bubbleY + 56);
+      ctx.lineTo(W / 2 - 80, bubbleY + 44);
+      ctx.fill();
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#111111';
+      ctx.font = 'bold 14px "Noto Sans KR"';
+      ctx.fillText(taunts[winPlayer.char.id] || '"이겼다! 약 오르지~!"', W / 2, bubbleY + 27);
+
+      // Loser sobbing text
+      ctx.fillStyle = '#74b9ff';
+      ctx.font = 'bold 12px "Noto Sans KR"';
+      ctx.fillText('흑흑... 분하다...', W / 2 + 115, 252);
+
+      // Header Banner & Score
+      ctx.fillStyle = winnerNum === 1 ? '#4facfe' : '#ff5e62';
+      ctx.font = '34px "Press Start 2P"';
+      ctx.fillText(`PLAYER ${winnerNum} WINS!`, W / 2, 95);
+
+      ctx.fillStyle = '#ffd32a';
+      ctx.font = '24px "Press Start 2P"';
+      ctx.fillText(`${p1.score}  :  ${p2.score}`, W / 2, 138);
+
+      if (Math.floor(Date.now() / 450) % 2 === 0) {
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '14px "Press Start 2P"';
+        ctx.fillText('PRESS SPACE OR ENTER TO PLAY AGAIN', W / 2, 445);
+      }
+    }
+  }
+
+  ctx.restore();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
